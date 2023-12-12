@@ -1,0 +1,97 @@
+# Input bindings are passed in via param block.
+
+param($Timer)
+
+# Enable the AzureRM Aliasing for older Functions
+#Enable-AzureRmAlias
+
+#1 User Account Details
+$username = Get-AzKeyVaultSecret -VaultName 'Key_vault_name' -Name 'Secret_Name' -AsPlainText
+$password = Get-AzKeyVaultSecret -VaultName 'Key_vault_name' -Name 'Secret_Name' -AsPlainText | ConvertTo-SecureString -asPlainText -Force 
+$credential = New-Object System.Management.Automation.PSCredential($username, $password)
+# Reference for above: https://datagulp.com/powerbi/power-bi-rest-api-how-to-get-authentication-token-with-powershell-cmdlets/
+
+#2. Authenticate to Power BI
+
+$SecPasswd = ConvertTo-SecureString $password -AsPlainText -Force
+$myCred = New-Object System.Management.Automation.PSCredential($username,$password)
+ 
+#3. Login-PowerBI 
+
+Connect-PowerBIServiceAccount -Tenant "Your_Tenant_ID" -ServicePrincipal -Credential $myCred
+
+#4. Define export path and current date to retrieve
+
+#Get Current Date Time
+$CurrentDateTime = (Get-Date)
+
+#Specify Folder Location for CSV Files to View &amp; Export
+$FolderAndCsvFilesLocation = "C:\home\site\wwwroot\AuditLogs"
+
+#dir "X:\mgasia\BI Reporting - Documents\Audit Logs\*.csv" | 
+$GetLastModifiedFileDateTime = Get-ChildItem "$FolderAndCsvFilesLocation\*.csv" | `
+
+# Get the last 1 Days Files
+Where{$_.LastWriteTime -gt (Get-Date).AddDays(-1)} | `
+
+# Select the last File
+ Select -First 1
+
+#Convert the LastWriteTime to DateTime
+$ConvertToDateTimeLastModified = [datetime]$GetLastModifiedFileDateTime.LastWriteTime
+ 
+# Workout the Difference between the Dates
+$DateDifference = New-timespan -Start $ConvertToDateTimeLastModified -End $CurrentDateTime
+
+#Create a Variable with the Number of Days
+$DaysDifference = $DateDifference.Days
+
+#If Days Difference = 0 Make it 1
+if ($DaysDifference -eq 0) {1} else {$DaysDifference}
+
+# List of Dates to Iterate Through
+$DaysDifference..1 |
+    foreach {
+        $Date = (((Get-Date).Date).AddDays(-$_))
+        $StartDate = (Get-Date -Date ($Date) -Format yyyy-MM-ddTHH:mm:ss)
+        $EndDate = (Get-Date -Date ((($Date).AddDays(1)).AddMilliseconds(-1)) -Format yyyy-MM-ddTHH:mm:ss)
+
+#FileName
+$FileName = (Get-Date -Date ($Date) -Format yyyyMMdd)
+ 
+# Export location of CSV FIles
+$ActivityLogsPath = "$FolderAndCsvFilesLocation\$FileName.csv"
+
+#4. Export out current date activity log events to CSV file
+
+$ActivityLogs = Get-PowerBIActivityEvent -StartDateTime $StartDate -EndDateTime $EndDate | ConvertFrom-Json
+
+$ActivityLogSchema = $ActivityLogs | `
+    Select-Object `
+        Id,CreationTime,CreationTimeUTC,RecordType,Operation,OrganizationId,UserType,UserKey,Workload,UserId,ClientIP,UserAgent,Activity,ItemName,WorkSpaceName,DashboardName,DatasetName,ReportName,WorkspaceId,ObjectId,DashboardId,DatasetId,ReportId,OrgAppPermission,CapacityId,CapacityName,AppName,IsSuccess,ReportType,RequestId,ActivityId,AppReportId,DistributionMethod,ConsumptionMethod, `
+        @{Name="RetrieveDate";Expression={$RetrieveDate}}
+
+$ActivityLogSchema | Export-Csv $ActivityLogsPath 
+
+#Move the File to Azure Blob Storage
+
+$StorageAccountName = Get-AzKeyVaultSecret -VaultName 'Key_vault_name' -Name 'Secret_Name' -AsPlainText 
+$StorageAccountKey = Get-AzKeyVaultSecret -VaultName 'Key_vault_name' -Name 'Secret_Name' -AsPlainText
+
+$ctx = New-AzureStorageContext -StorageAccountName $StorageAccountName -StorageAccountKey $StorageAccountKey
+
+# The Source Share Name found via Storage Explorer (Preview)
+$SourceShareName = Get-AzKeyVaultSecret -VaultName 'Key_vault_name' -Name 'Secret_Name' -AsPlainText
+
+#This is the location of the Source Files in the Blob Container
+#You can remove the D:\Home from the location above
+$SourceFilePath = "site\wwwroot\AuditLogs\$FileName.csv"
+
+#The Destination Container Name where the Logs will be moved it
+$DestinationContainerName = Get-AzKeyVaultSecret -VaultName 'Key_vault_name' -Name 'Secret_Name' -AsPlainText
+
+Start-AzureStorageBlobCopy -SrcShareName $SourceShareName -SrcFilePath $SourceFilePath `
+-DestContainer $DestinationContainerName -DestBlob "$FileName.csv" -Context $ctx -Force
+
+#End of ForEach Loop
+}
